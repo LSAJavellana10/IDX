@@ -16,10 +16,19 @@ $app_data = ArchiveApp::get_data();
 EnqueueAssets::vars( 'app', 'CT_IDX_APP', $app_data );
 
 add_action( 'wp_enqueue_scripts', static function () {
-	wp_dequeue_script( 'gmaps' );
-	wp_deregister_script( 'gmaps' );
-	wp_dequeue_script( 'gmapsPlaces' );
-	wp_deregister_script( 'gmapsPlaces' );
+    $scripts_to_remove = array(
+        'gmaps',
+        'gmapsPlaces', 
+        'infobox',
+        'marker',
+        'markerCluster',
+        'mapping',
+    );
+
+    foreach ( $scripts_to_remove as $handle ) {
+        wp_dequeue_script( $handle );
+        wp_deregister_script( $handle );
+    }
 }, 110 );
 
 $listing_id = get_query_var( 'listing_id' );
@@ -281,6 +290,31 @@ function formatPropertyType($type) {
     return isset($types[$type]) ? $types[$type] : ucwords($type);
 }
 
+function getComplianceStatusLabel($status) {
+    $extended = \Contempo\IDXPro\Admin\SettingsPage::getSetting(
+        \Contempo\IDXPro\Admin\SettingsPage::GENERAL_SETITNGS_PAGE,
+        'ct_enable_extended_mls_compliance_info'
+    );
+
+    if ($extended) {
+        switch (strtolower($status)) {
+            case 'backup':
+                return 'Contingent';
+            case 'pending':
+                return 'Pending - BU Requested';
+            default:
+                return ucfirst(str_replace('_', ' ', $status));
+        }
+    }
+
+    switch (strtolower($status)) {
+        case 'backup':
+            return 'Under Contract';
+        default:
+            return ucfirst(str_replace('_', ' ', $status));
+    }
+}
+
 function calculateBadgeText($listing) {
     $now = new DateTime();
     $listDate = new DateTime($listing['list_date']);
@@ -290,7 +324,7 @@ function calculateBadgeText($listing) {
     if ($hoursSinceListed < 24) {
         return "New - " . esc_html($hoursSinceListed) . " hours ago";
     } else {
-        return esc_html(str_replace('_', ' ', $listing['status']));
+        return esc_html(getComplianceStatusLabel($listing['status']));
     }
 }
 
@@ -406,9 +440,13 @@ function ct_listing_to_markup( $data, $listing_id, $app_data ) {
 				$html .= '<div class="listing-photo" style="position: relative;">';
 				$html .= '<img src="' . esc_url($photo['xlarge']) . '" alt="Image ' . ($i + 1) . ' of property listing at ' . esc_attr($listing['formatted_address']) . '">';
 
-				if (isset($listing['mls']['idx_logo_small'])) {
-					$html .= '<img src="' . esc_url($listing['mls']['idx_logo_small']) . '" alt="' . esc_attr($listing['mls']['name']) . '" style="position: absolute; top: 3px; left: 3px; width: 40px; padding: 1px; border-radius: 4px; background-color: white;">';
-				}
+			$hide_logo = \Contempo\IDXPro\Admin\SettingsPage::getSetting(
+				\Contempo\IDXPro\Admin\SettingsPage::GENERAL_SETITNGS_PAGE,
+				'ct_enable_extended_mls_compliance_info'
+			);
+			if (!$hide_logo && isset($listing['mls']['idx_logo_small'])) {
+				$html .= '<img src="' . esc_url($listing['mls']['idx_logo_small']) . '" alt="' . esc_attr($listing['mls']['name']) . '" style="position: absolute; top: 3px; left: 3px; width: 40px; padding: 1px; border-radius: 4px; background-color: white;">';
+			}
 
 				$html .= '</div>';
 			}
@@ -756,7 +794,12 @@ function ct_listing_to_markup( $data, $listing_id, $app_data ) {
     
 	$listingDetailsString = implode(', ', $listingDetails);
 
-	$html .= "<div class='mls-info'>";
+	$extended_compliance = \Contempo\IDXPro\Admin\SettingsPage::getSetting(
+		\Contempo\IDXPro\Admin\SettingsPage::GENERAL_SETITNGS_PAGE,
+		'ct_enable_extended_mls_compliance_info'
+	);
+	$mls_info_style = $extended_compliance ? " style='font-size: 0.875rem;'" : "";
+	$html .= "<div class='mls-info'$mls_info_style>";
 
 		if (!empty($listing_agent['name'])) {
 			$agentName = esc_html($listing_agent['name']);
@@ -772,7 +815,6 @@ function ct_listing_to_markup( $data, $listing_id, $app_data ) {
 		$html .= "<p>Source: $mlsName</p>";
 		$html .= "<p>$complianceText</p>";
 		$html .= "<a href='" . $listing['url'] . "' rel='canonical'>View Listing</a>";
-		
 	$html .= "</div>";
 
 	$html .= '<div class="listing-breadcrumb">';

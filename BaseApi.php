@@ -150,6 +150,11 @@ class BaseApi {
 			$mls_ids = array_filter( $mls_ids, static function ( $mls_id ) {
 				return is_numeric( $mls_id );
 			} );
+			
+			// Strip leading zeros from MLS IDs (encryption pads with zeros)
+			$mls_ids = array_map( static function ( $mls_id ) {
+				return ltrim( $mls_id, '0' ) ?: '0';
+			}, $mls_ids );
 		}
 
 		return $mls_ids ?? [];
@@ -175,10 +180,23 @@ class BaseApi {
 
 		$mls_ids = ! empty( $params['mlses'] ) && is_array( $params['mlses'] ) ? $params['mlses'] :  [];
 
-		if( empty( $mls_ids ) ) {
+		// Don't add global MLS IDs if an office UID is specified
+		// The office UID should handle which MLSs to search
+		if( empty( $mls_ids ) && empty( $params['officeUids'] ) ) {
 			$mls_ids = self::get_mls_ids();
 		}
 
+		// DEBUG: Log MLS IDs being added to request
+		if (defined('WP_DEBUG') && WP_DEBUG) {
+			if (!empty($params['officeUids'])) {
+				error_log('[BaseApi fetch_api] Office UID in params: "' . $params['officeUids'] . '" - skipping global MLS IDs');
+			}
+			if (!empty($mls_ids)) {
+				error_log('[BaseApi fetch_api] MLS IDs being added to URL: ' . print_r($mls_ids, true));
+			} else {
+				error_log('[BaseApi fetch_api] No MLS IDs - mlses parameter will NOT be sent');
+			}
+		}
 
 		if ( !empty( $mls_ids ) ) {
 			$url = self::add_query_arg_one( 'mlses', $mls_ids, $url );
@@ -188,6 +206,12 @@ class BaseApi {
 		$ct_idx_domain = SettingsPage::getSetting( SettingsPage::GENERAL_SETITNGS_PAGE, 'ct_idx_domain' );
 		if ( !empty( $ct_idx_domain ) ) {
 			$url = self::add_query_arg_one( 'user_id', $ct_idx_domain, $url );
+		}
+		
+		// DEBUG: Log final URL being requested (without API key for security)
+		if (defined('WP_DEBUG') && WP_DEBUG) {
+			$debug_url = str_replace('https://services.realigned.co/', '', $url);
+			error_log('[BaseApi fetch_api] Final API request URL: ' . $debug_url);
 		}
 
 		$args = [
@@ -336,8 +360,8 @@ class BaseApi {
 		$data = [
 			'size' => 50, // Keep default as 50, will be overridden if size is passed
 			'view' => 'detailed',
-			'mlses' => '',
-			'minPhotos' => '1',
+			// Don't initialize mlses - only add it if we have actual MLS IDs
+			//'minPhotos' => '1',
 		];
 
 		$sort = sanitize_text_field( $args['sort'] ?? '' );
@@ -525,10 +549,27 @@ class BaseApi {
 
 			$ct_idx_office_uids_data = SettingsPage::getSetting( SettingsPage::GENERAL_SETITNGS_PAGE, 'ct_idx_office_uids_data' );
 
+			// DEBUG: Log office UID lookup
+			if (defined('WP_DEBUG') && WP_DEBUG) {
+				error_log('[BaseApi fetch_items] Looking for office UID: "' . $listingOfficeUid . '"');
+				error_log('[BaseApi fetch_items] Configured offices: ' . print_r(array_column($ct_idx_office_uids_data ?? [], 'uid'), true));
+			}
+			
+			$found_office = false;
 			foreach( $ct_idx_office_uids_data as $ct_idx_office_uids_data_item ) {
 				if( is_array( $ct_idx_office_uids_data_item ) && ! empty( $ct_idx_office_uids_data_item['mls_ids'] ) && $ct_idx_office_uids_data_item['uid'] === $listingOfficeUid ) {
 					$data['mlses'] = BaseApi::decode_mls_ids( $ct_idx_office_uids_data_item['mls_ids'] );
+					$found_office = true;
+					
+					if (defined('WP_DEBUG') && WP_DEBUG) {
+						error_log('[BaseApi fetch_items] FOUND office! MLS IDs (raw): ' . print_r($ct_idx_office_uids_data_item['mls_ids'], true));
+						error_log('[BaseApi fetch_items] MLS IDs (decoded): ' . print_r($data['mlses'], true));
+					}
 				}
+			}
+			
+			if (defined('WP_DEBUG') && WP_DEBUG && !$found_office) {
+				error_log('[BaseApi fetch_items] WARNING: Office UID "' . $listingOfficeUid . '" NOT FOUND in settings or has no MLS IDs configured!');
 			}
 		}
 
@@ -579,6 +620,11 @@ class BaseApi {
 
 		if( isset( $data['officeUids'] ) && isset( $data['listingOfficeUid'] ) ) {
 			unset( $data['listingOfficeUid'] );
+		}
+	
+		// DEBUG: Log final parameters being sent to API
+		if (defined('WP_DEBUG') && WP_DEBUG) {
+			error_log('[BaseApi fetch_items] Final API params: ' . print_r($data, true));
 		}
 
 		$result = self::fetch_api( 'api/mls-search/v1/listings', $data );
@@ -860,6 +906,27 @@ class BaseApi {
 
 	static public function prepare_contact_agent_for_api_user( $user_id ) {
 		$current_user = get_user_by( 'id', $user_id );
+		
+		// Return empty contact agent if user not found
+		if ( !$current_user ) {
+			return [
+				'name' => '',
+				'license_number' => '',
+				'email' => '',
+				'phone' => '',
+				'location' => '',
+				'bio' => '',
+				'title' => '',
+				'tagline' => '',
+				'tags' => [],
+				'photo' => '',
+				'office' => [
+					'name' => '',
+					'phone' => '',
+				],
+			];
+		}
+		
 		$first_name = $current_user->first_name;
 		$last_name = $current_user->last_name;
 
@@ -1053,64 +1120,109 @@ class BaseApi {
 	}
 
 	public static function get_item_by_id( $mls_listing_id ) {
-		//error_log('IDX Detail: get_item_by_id called with MLS listing ID: ' . $mls_listing_id);
-		
+		if ( empty( $mls_listing_id ) ) {
+			return false;
+		}
+
 		$wpdb2 = new \Contempo\IDXPro\Common\Wpdb2();
+		$internalID = null;
+		$listing = null;
 
-		$internalID = $wpdb2->get_var( "SELECT listing_id FROM {$wpdb2->idxIdsTable} WHERE mls_listing_id = %s", $mls_listing_id );
-		
-		//error_log('IDX Detail: Database lookup for MLS ID "' . $mls_listing_id . '" returned internal ID: ' . ($internalID ?? 'null'));
+		// Normalize: lowercase, strip dashes (matches how prepareListing stores it)
+		$normalized_input = str_replace( '-', '', strtolower( $mls_listing_id ) );
 
-		if ( $mls_listing_id && $internalID ) {
-			//error_log('IDX Detail: Making API call for internal ID: ' . $internalID);
-			
-			$listing = self::fetch_api( 'api/mls-search/v1/listings/'.$internalID );
-			
-			//error_log('IDX Detail: Listing API response type: ' . gettype($listing));
-			//error_log('IDX Detail: Listing API response: ' . json_encode($listing));
-			
-			if ( !$listing || (isset($listing['success']) && !$listing['success']) ) {
-				//error_log('IDX Detail: Failed to fetch listing data from API');
+		// --- Step 1: Try DB lookup ---
+		$db_internal_id = $wpdb2->get_var( "SELECT listing_id FROM {$wpdb2->idxIdsTable} WHERE mls_listing_id = %s", $normalized_input );
+
+		if ( $db_internal_id ) {
+			$db_listing = self::fetch_api( 'api/mls-search/v1/listings/' . $db_internal_id );
+
+			if ( $db_listing && ! ( isset( $db_listing['success'] ) && ! $db_listing['success'] ) ) {
+				$returned_mls_id = isset( $db_listing['mls_listing_id'] ) ? str_replace( '-', '', strtolower( $db_listing['mls_listing_id'] ) ) : '';
+
+				if ( $returned_mls_id === $normalized_input ) {
+					// DB hit is valid — use this listing
+					self::prepareListing( $db_listing );
+					$internalID = $db_internal_id;
+					$listing = $db_listing;
+				}
+			}
+
+			// DB hit was stale or API returned wrong listing — purge all rows for this MLS ID
+			if ( ! $internalID ) {
+				$wpdb2->delete( $wpdb2->idxIdsTable, [ 'mls_listing_id' => $normalized_input ] );
+			}
+		}
+
+		// --- Step 2: API fallback if DB miss or stale purge ---
+		if ( ! $internalID ) {
+			// Slugs lowercase everything; MLS IDs in the API are typically uppercase
+			$mls_listing_id_upper = strtoupper( $mls_listing_id );
+
+			$fallback_response = self::fetch_api( 'api/mls-search/v1/listings', [
+				'mlsListings' => $mls_listing_id_upper,
+				'size' => 1,
+				'view' => 'detailed',
+			] );
+
+			// If uppercase didn't match, retry with original casing
+			if ( ! isset( $fallback_response['content']['listings'] ) || empty( $fallback_response['content']['listings'] ) ) {
+				$fallback_response = self::fetch_api( 'api/mls-search/v1/listings', [
+					'mlsListings' => $mls_listing_id,
+					'size' => 1,
+					'view' => 'detailed',
+				] );
+			}
+
+			if ( ! isset( $fallback_response['content']['listings'] ) || empty( $fallback_response['content']['listings'] ) ) {
 				return false;
 			}
 
-			self::prepareListing( $listing );
-			
-			//error_log('IDX Detail: Fetching similar listings...');
-			$similarListings = self::fetch_api( "api/mls-search/v1/listings/{$internalID}/similar?size=4&view=detailed&distance=5mi&tolerance=0.2" );
-			//error_log('IDX Detail: Similar listings response type: ' . gettype($similarListings));
+			// Search endpoint found it — extract internal ID and persist the mapping
+			$search_listing = $fallback_response['content']['listings'][0];
+			self::prepareListing( $search_listing, $fallback_response['content']['mls'] ?? null );
+			$internalID = $search_listing['id'] ?? null;
 
-			//error_log('IDX Detail: Fetching comparable sales...');
-			$comparableSales = self::fetch_api( "api/mls-search/v1/listings/{$internalID}/similar?size=9&view=summary&distance=5mi&tolerance=0.2&statuses=sold" );
-			//error_log('IDX Detail: Comparable sales response type: ' . gettype($comparableSales));
-
-			$history = false;
-
-			$rupid = $listing['rupid'] ?? null;
-			//error_log('IDX Detail: Listing rupid: ' . ($rupid ?? 'null'));
-
-			if( !empty( $rupid) ) {
-				//error_log('IDX Detail: Fetching listing history...');
-				$history = self::fetch_api( "api/mls-search/v1/listing-history/?rupid={$rupid}&dateSince=1900-09-14T00%3A00Z&view=detailed" );
-				//error_log('IDX Detail: History response type: ' . gettype($history));
+			if ( ! $internalID ) {
+				return false;
 			}
 
-			$result = [
-				'id' => $internalID,
-				'listing' => $listing,
-				// 'similarListings' => $similarListings ? $similarListings['listings'] : [],
-				'comparableSales' => $comparableSales ? $comparableSales['listings'] : [],
-				'history' => $history ? $history['content'] : [],
-			];
-			
-			//error_log('IDX Detail: Returning result with keys: ' . implode(', ', array_keys($result)));
-			//error_log('IDX Detail: Listing data has keys: ' . (is_array($listing) ? implode(', ', array_keys($listing)) : 'not an array'));
-			
-			return $result;
+			self::save_ids();
+
+			// Fetch the full listing by internal ID (search endpoint returns limited data)
+			$full_listing = self::fetch_api( 'api/mls-search/v1/listings/' . $internalID );
+
+			if ( $full_listing && ! ( isset( $full_listing['success'] ) && ! $full_listing['success'] ) ) {
+				self::prepareListing( $full_listing );
+				$listing = $full_listing;
+			} else {
+				// Fall back to the search result if full fetch fails
+				$listing = $search_listing;
+			}
 		}
 
-		//error_log('IDX Detail: Failed to find listing - MLS ID: ' . $mls_listing_id . ', Internal ID: ' . ($internalID ?? 'null'));
-		return false;
+		// --- Step 3: Fetch supplementary data ---
+		if ( ! $internalID || ! $listing ) {
+			return false;
+		}
+
+		$similarListings = self::fetch_api( "api/mls-search/v1/listings/{$internalID}/similar?size=4&view=detailed&distance=5mi&tolerance=0.2" );
+		$comparableSales = self::fetch_api( "api/mls-search/v1/listings/{$internalID}/similar?size=9&view=summary&distance=5mi&tolerance=0.2&statuses=sold" );
+
+		$history = false;
+		$rupid = $listing['rupid'] ?? null;
+
+		if ( ! empty( $rupid ) ) {
+			$history = self::fetch_api( "api/mls-search/v1/listing-history/?rupid={$rupid}&dateSince=1900-09-14T00%3A00Z&view=detailed" );
+		}
+
+		return [
+			'id' => $internalID,
+			'listing' => $listing,
+			'similarListings' => $similarListings ? $similarListings['listings'] : [],
+			'comparableSales' => $comparableSales ? $comparableSales['listings'] : [],
+			'history' => $history ? $history['content'] : [],
+		];
 	}
 
 
