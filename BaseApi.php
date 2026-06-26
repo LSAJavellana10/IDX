@@ -299,8 +299,7 @@ class BaseApi {
 
 		$listing['slug'] = $slug;
 		$listing['url'] = \home_url("/property-search/listings/detail/{$slug}/");
-		//$listing['url'] = '#idx-' . \home_url("/property-search/listings/detail/{$slug}/");
-
+		
 		//error_log('IDX Detail: prepareListing - generated slug: ' . $slug);
 		//error_log('IDX Detail: prepareListing - generated URL: ' . $listing['url']);
 

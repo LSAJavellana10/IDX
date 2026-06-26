@@ -657,3 +657,26 @@ add_action('template_redirect', function() {
         }
     }
 });
+
+// add_action('init', function () {
+//     if (session_status() === PHP_SESSION_ACTIVE) {
+//         session_write_close();
+//     }
+// }, 999);
+
+add_action('plugins_loaded', function () {
+
+    if (session_status() === PHP_SESSION_ACTIVE) {
+
+        error_log("=== SESSION ACTIVE ===");
+
+        $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
+
+        foreach ($trace as $i => $call) {
+            if (isset($call['file'])) {
+                error_log("#{$i} " . $call['file'] . ' : ' . ($call['line'] ?? ''));
+            }
+        }
+    }
+
+}, 1);
